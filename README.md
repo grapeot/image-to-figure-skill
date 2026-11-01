@@ -10,6 +10,7 @@ An agent skill (`skills/image-to-figure/SKILL.md`) plus a command-line tool (`im
 6. **Prep** in Blender: automatic orientation check against the front view, normalised height, decimation, a soft-vinyl material grade, optional cheek blush. Produces a `.blend` master and a clean GLB.
 7. **Review**: renders from the same four angles as the turnaround plus a 3/4 and a face close-up, and a comparison sheet (input views above, renders below).
 8. **Turntable**: a 360-degree video on a clear acrylic display base.
+9. **Print** (optional): a watertight, manifold solid scaled to a height in millimetres, with floating parts merged or removed, thin features reported (and optionally thickened), optional hollowing with drain holes, a flat base or pedestal, STL and 3MF files and a validation report.
 
 It is built for a coding agent (Claude Code, Codex, Cursor, OpenCode and similar) to drive, with you approving the spending and judging the look. Every command prints one JSON object, uses fixed exit codes, and passes provider and Blender errors through unchanged. Commands that cost money print a plan with a cost estimate and do nothing until you add `--execute`; a per-project budget (default $5) refuses calls that would exceed it, and `img2fig spend` shows what has been spent.
 
@@ -62,6 +63,18 @@ img2fig turntable                                  # turntable/turntable.mp4
 ```
 
 Check `views/` before paying for the 3D stage: whatever the image model put in the turnaround, including details it invented, ends up in the model. Fix those with `img2fig edit --fix "..." --execute` and crop again.
+
+## 3D printing
+
+```bash
+uv pip install -e '.[print]'
+img2fig print --height 100 --base pedestal                # solid
+img2fig print --height 100 --base pedestal --hollow 2.0   # hollow resin print with a drain hole
+```
+
+Output goes to `<workdir>/print/`: `figure.stl`, `figure.3mf` (millimetres), `figure_report.json`, a cross-section image and preview renders. The report states whether the mesh is watertight and a valid manifold, its volume, size and height, how many separate parts it has, and where features are thinner than `--min-wall`. Repair works on a voxel grid (default 0.2 mm for a 100 mm figure), so details smaller than a voxel are smoothed away and parts closer than about three voxels fuse.
+
+Colour: the STL and 3MF are single-colour. `--color` also writes `figure_color.ply` with per-vertex colours taken from the model's texture, which full-colour print services usually accept (check the formats your service lists). For multi-material FDM, paint the regions in your slicer, using the coloured file as a reference. Painting a single-colour print by hand remains the most common route for figures.
 
 ## Costs
 

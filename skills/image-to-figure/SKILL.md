@@ -1,6 +1,6 @@
 ---
 name: image-to-figure
-description: Turn one character image into a 3D collectible figure with the img2fig CLI - look-dev render, four-view turnaround, view cropping, targeted image edits, multiview image-to-3D on fal (Tripo by default, optional bake-off), Blender prep (orientation, normalise, decimate, soft-vinyl grade, blush), review renders, comparison sheet and turntable video. Paid calls are dry-run first with a cost estimate and a budget guard. Use when someone wants a figure-style 3D model or turntable of a character they have the rights to use.
+description: Turn one character image into a 3D collectible figure with the img2fig CLI - look-dev render, four-view turnaround, view cropping, targeted image edits, multiview image-to-3D on fal (Tripo by default, optional bake-off), Blender prep (orientation, normalise, decimate, soft-vinyl grade, blush), review renders, comparison sheet, turntable video, and 3D-print repair (watertight solid, fragments, thin-wall check, hollowing, base, STL/3MF, validation report). Paid calls are dry-run first with a cost estimate and a budget guard. Use when someone wants a figure-style 3D model or turntable of a character they have the rights to use.
 ---
 
 # image-to-figure
@@ -73,6 +73,24 @@ List what the figure must keep, with sides stated from the character's point of 
 - The work directory holds generated images, models and renders of the owner's character. Do not publish, upload or commit them unless the owner asks; treat characters the owner licensed from someone else as private.
 - Prompts are in `src/image_to_figure/prompts.py`; `--prompt-file` replaces a template for one call.
 
+## 3D printing
+
+`img2fig print` turns a model (default `figure/figure_clean.glb`; any GLB, STL, OBJ or PLY with `--model`) into a print-ready solid. Needs the `print` extra (`uv pip install -e '.[print]'`); installing `pymeshlab` as well (GPL, not a dependency) adds an explicit self-intersection count to the report.
+
+```bash
+img2fig print --height 100 --base pedestal                 # solid, FDM or resin
+img2fig print --height 100 --base pedestal --hollow 2.0    # resin: 2 mm wall, drain hole(s)
+img2fig print --model raw_tripo.glb --rot -90 --height 80  # a raw Tripo GLB faces +X
+```
+
+Done when: the command exits 0 and `checks.printable` is true (watertight, a valid 2-manifold by manifold3d, positive volume); `checks.parts` is 1 unless loose parts were kept on purpose; `checks.self_intersecting_faces` is 0 when it was measured; `output.height_mm` equals `--height` plus any pedestal within one voxel; you looked at `print/figure_section.png` (walls, cavity and drain holes) and the `figure_preview_*.png` renders, and reported every entry in `warnings`, in particular thin regions (`checks.wall_thickness`: `thin_volume_fraction`, `largest_thin_regions` with their positions in mm) and what to do about them.
+
+How it works: the surface is voxelised (default voxel = height / 500), gaps up to about three voxels are sealed and the inside filled, so open edges, overlapping shells and self-intersections disappear; a signed distance field then carries the base cut, pedestal, hollowing and drain holes; marching cubes, Taubin smoothing and manifold3d produce the final mesh. Details smaller than about one voxel are lost, and parts closer than about three voxels fuse.
+
+Options: `--min-wall` (default 1.0 mm; resin can go lower, FDM usually wants 1.2 or more) sets what counts as thin, and `--thicken` grows thin regions to that thickness, which also blunts them; `--fragments merge|remove|keep` with `--merge-gap` (default 2 mm) decides floating parts: in merge mode parts within the gap are attached with a bridge and farther ones are kept and reported, never silently dropped; crumbs under 1 mm3 are always removed; `--base flat|pedestal|none`; `--hollow WALL` with `--drain-hole` drills one hole per cavity from below (pockets under 20 mm3 stay solid); `--color` writes a vertex-colour PLY from the model texture for full-colour services. The STL and 3MF are single-colour.
+
+Observed while building it: the binary distance field leaves visible terraces unless the result is smoothed (Taubin, `--smooth`, default 10 iterations, keeps volume); projecting vertices back onto the source surface instead folded thin sheets and was dropped. Smoothing and mesh simplification can both introduce self-intersections in thin regions; the command tries less smoothing and tighter tolerances until the check is clean and reports what it settled on (`smooth_and_simplify` step). Hollowing must leave undrainable pockets solid, otherwise they become sealed voids. On a real image-to-3D figure, two symmetric 120 mm3 pieces were modelled as separate shells 1.3 mm from the body; an early version removed them because they sat just beyond a 1 mm merge gap, which is why distant parts are now kept and reported instead.
+
 ## Output layout
 
 ```text
@@ -84,6 +102,7 @@ List what the figure must keep, with sides stated from the character's point of 
   figure/figure.blend (graded master), figure_clean.glb (oriented, decimated, ungraded), orient/
   renders/{front,left,back,right,q34,face}.png, compare.jpg
   turntable/turntable.mp4
+  print/figure.stl, figure.3mf, figure_color.ply (--color), figure_report.json, figure_section.png, figure_preview_*.png
   logs/*.log
   spend.json
 ```

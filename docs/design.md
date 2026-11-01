@@ -67,6 +67,20 @@ Providers disagree on which way their GLBs face after import. `prep --rot auto` 
 
 The grade keeps the provider's textures and changes how they are shaded: a saturation lift (AgX greys pale colours), an optional tone curve, roughness remapped to 0.55-0.8, no metal, lower specular, a little subsurface. `--keep-gloss T` keeps the original roughness and metal wherever the source roughness is below T, for crystal and patent parts. The blush is a sum of soft ellipsoids in object space multiplied into the base colour, placed by ray casts from the front.
 
+## Print repair
+
+`print3d.py` turns any figure mesh into a print-ready solid on a voxel grid (`img2fig print`):
+
+1. Load, convert glTF Y-up to Z-up, optional rotation, scale so the figure is `--height` mm after the flat cut.
+2. Voxelise: dense surface samples mark surface voxels; a closing of k = 1..4 voxels seals gaps and `binary_fill_holes` fills the interior (accepted when the enclosed interior is at least 10% of the shell). If nothing gets enclosed (large openings), boundary loops are capped with fans on the mesh and the fill is retried.
+3. Fragments: 26-connected components other than the largest are removed when under 1 mm3 (or always with `--fragments remove`), bridged with a lens-shaped union when within `--merge-gap` (default 2 mm), and otherwise kept and reported, so a real part of the design is never dropped silently.
+4. Thin features: a ball opening of diameter `--min-wall` (via distance transforms) finds what a ball that size cannot reach; `--thicken` grows those regions by half the wall.
+5. Signed distance field (Euclidean distance transforms, light Gaussian smoothing, a one-voxel shift that removes the half-voxel inflation of surface-touching voxels). The base cut, pedestal, hollowing (`max(f, -(f + wall))` applied only near drainable cavities) and drain holes (vertical cylinders from below into each cavity's lowest point) are max/min operations on this field.
+6. Marching cubes on the padded field, then a small search: Taubin smoothing at full, half and zero iterations (sole pinned to its plane) times manifold3d simplification at voxel/10, /20, /40 and none, stopping at the first candidate pymeshlab (when installed) finds free of self-intersections, otherwise keeping the one with the fewest. Meshes keep manifold3d's vertex indexing, because merging coincident positions turns touching sheets into pinches. Zero-volume slivers are dropped.
+7. Validation: trimesh watertight/winding/volume, manifold3d status and genus, part count, pymeshlab self-intersections (optional), thin-wall statistics on the final field; STL and 3MF export; section image and Blender preview renders.
+
+Exit 6 if the result is not watertight and manifold. Measured on a 30 mm cube at 0.25 mm voxels: 29.93 mm per side.
+
 ## Cost model
 
 Image calls: output tokens for each quality tier at 1024x1024 (OpenAI's published figures), scaled with the square root of the megapixels (measured usage grows sublinearly: 3336 output tokens for a 3840x2160 sheet at high quality), $30 per million output tokens, $8 per million image input tokens (about 1,600 per reference image), $5 per million text tokens, and a 25% margin. 3D calls: per-call prices for the arguments this tool sends (Tripo $0.60, Hunyuan3D $0.675, Rodin $1.20, Meshy $1.52). Numbers are in `costs.py` with their date.

@@ -454,6 +454,36 @@ def cmd_turntable(args) -> dict[str, Any]:
             "frames_dir": str(frames_dir) if args.keep_frames else None}
 
 
+def cmd_print(args) -> dict[str, Any]:
+    from . import print3d
+
+    wd = _wd(args)
+    model = _existing(args.model, "--model", wd) if args.model else _existing(
+        wd.root / "figure" / "figure_clean.glb", "figure/figure_clean.glb (run `img2fig prep` first, or pass --model)")
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else wd.sub("print")
+    opts = print3d.PrintOptions(
+        height_mm=args.height, voxel_mm=args.voxel, up=args.up, rot_deg=args.rot, min_wall_mm=args.min_wall,
+        thicken=args.thicken,
+        fragments=args.fragments, merge_gap_mm=args.merge_gap, hollow_wall_mm=args.hollow,
+        drain_hole_mm=args.drain_hole, base=args.base, pedestal_height_mm=args.pedestal_height,
+        pedestal_margin_mm=args.pedestal_margin, color=args.color, smooth_iterations=args.smooth)
+    res = print3d.repair(model, out_dir, opts, name=args.name)
+    stl = Path(res["output"]["files"]["stl"])
+    res["report"] = str(out_dir / f"{args.name}_report.json")
+    if not args.no_preview:
+        res["previews"] = {}
+        res["previews"].update(print3d.section_image(stl, out_dir / f"{args.name}_section.png"))
+        if blender_mod.find_blender():
+            r = _render(args, wd, stl, ["front", "left", "back", "q34"], out_dir, f"{args.name}_preview_", 0.0)
+            res["previews"]["renders"] = r["renders"]
+        else:
+            res["warnings"].append("no Blender found: preview renders skipped (section image still written)")
+    from .workdir import write_json_atomic
+
+    write_json_atomic(Path(res["report"]), res)
+    return res
+
+
 def cmd_spend(args) -> dict[str, Any]:
     wd = _wd(args)
     ledger = Ledger(wd.ledger_path)
@@ -591,6 +621,31 @@ def build_parser() -> JsonArgParser:
     s.add_argument("--out")
     s.add_argument("--keep-frames", action="store_true")
     s.set_defaults(func=cmd_turntable)
+
+    s = sub.add_parser("print", parents=[common, render_opts],
+                       help="3D-print repair: watertight solid, base, hollowing, STL + 3MF, validation report")
+    s.add_argument("--model", help="default figure/figure_clean.glb")
+    s.add_argument("--height", type=float, default=100.0, help="figure height in mm, excluding any pedestal")
+    s.add_argument("--voxel", type=float, help="voxel size in mm (default height/500, 0.1-0.6)")
+    s.add_argument("--up", default="auto", choices=["auto", "y", "z"], help="up axis of the input (auto: glTF y)")
+    s.add_argument("--rot", type=float, default=0.0,
+                   help="rotate about the vertical axis so the figure faces the front camera (raw Tripo GLB: -90)")
+    s.add_argument("--min-wall", type=float, default=1.0, help="thinnest feature to accept, mm (default 1.0)")
+    s.add_argument("--thicken", action="store_true", help="grow features thinner than --min-wall")
+    s.add_argument("--fragments", default="merge", choices=["merge", "remove", "keep"])
+    s.add_argument("--merge-gap", type=float, default=2.0,
+                   help="attach floating parts closer than this, mm; farther ones are kept and reported")
+    s.add_argument("--hollow", type=float, help="hollow with this wall thickness, mm (resin prints)")
+    s.add_argument("--drain-hole", type=float, default=3.0, help="drain hole diameter when hollow, mm")
+    s.add_argument("--base", default="flat", choices=["flat", "pedestal", "none"])
+    s.add_argument("--pedestal-height", type=float, default=3.0)
+    s.add_argument("--pedestal-margin", type=float, default=3.0, help="pedestal radius beyond the footprint, mm")
+    s.add_argument("--color", action="store_true", help="also write a vertex-colour PLY from the model texture")
+    s.add_argument("--smooth", type=int, default=10, help="Taubin smoothing iterations on the result (0: off)")
+    s.add_argument("--out-dir", help="default <workdir>/print")
+    s.add_argument("--name", default="figure")
+    s.add_argument("--no-preview", action="store_true")
+    s.set_defaults(func=cmd_print)
 
     s = sub.add_parser("spend", parents=[common], help="money spent from this work directory and budget left")
     s.add_argument("--budget", type=float)

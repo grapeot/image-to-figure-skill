@@ -9,7 +9,7 @@ Check for a `.venv` at the repository root first. Activate it if present; otherw
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install -e '.[dev,providers]'
+uv pip install -e '.[dev,providers,print]'
 ruff check .
 python -m pytest -q                  # offline; Blender tests skip when no Blender is found
 IMG2FIG_LIVE=1 python -m pytest -m live -q   # opt-in, spends money, needs OPENAI_API_KEY and FAL_KEY

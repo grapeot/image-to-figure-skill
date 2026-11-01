@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 providers = ["openai>=1.60", "fal-client>=0.5"]
+print = ["trimesh>=4.4", "manifold3d>=2.5", "scipy>=1.11", "scikit-image>=0.22", "networkx>=3", "lxml>=5"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
