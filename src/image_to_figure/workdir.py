@@ -16,6 +16,8 @@ One work directory holds one figure project:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -24,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .errors import BudgetError
+from .errors import BudgetError, UsageError
 
 VIEW_NAMES = ("front", "left", "back", "right")
 
@@ -117,9 +119,27 @@ class Ledger:
         self.path = path
 
     def load(self) -> dict[str, Any]:
-        if self.path.exists():
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        return {"entries": []}
+        if not self.path.exists():
+            return {"entries": []}
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(data.get("entries"), list):
+                raise ValueError("no entries list")
+            return data
+        except (ValueError, AttributeError) as e:
+            raise UsageError(f"spend ledger is not valid JSON: {self.path}; fix or move it aside",
+                             {"path": str(self.path), "error": str(e)}) from e
+
+    @contextlib.contextmanager
+    def locked(self):
+        """Hold an exclusive lock for check -> paid call -> record, so parallel commands cannot overspend."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path.with_suffix(".lock"), "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield self
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
     def spent(self) -> float:
         total = 0.0
@@ -128,7 +148,7 @@ class Ledger:
             total += float(v if v is not None else e.get("estimate_usd", 0.0))
         return round(total, 4)
 
-    def check(self, estimate: float, budget: float | None) -> dict[str, Any]:
+    def check(self, estimate: float, budget: float | None) -> dict[str, Any]:  # budget None: report only
         spent = self.spent()
         info: dict[str, Any] = {"spent_usd": spent, "estimate_usd": round(estimate, 4), "budget_usd": budget}
         if budget is not None:
@@ -148,8 +168,20 @@ class Ledger:
         write_json_atomic(self.path, data)
 
 
-def budget_from(arg: float | None) -> float | None:
-    if arg is not None:
-        return arg
-    env = os.environ.get("IMG2FIG_BUDGET_USD")
-    return float(env) if env else None
+DEFAULT_BUDGET_USD = 5.0
+
+
+def budget_from(arg: float | None) -> float:
+    """--budget, else $IMG2FIG_BUDGET_USD, else DEFAULT_BUDGET_USD. Always positive."""
+    if arg is None:
+        env = os.environ.get("IMG2FIG_BUDGET_USD")
+        if env:
+            try:
+                arg = float(env)
+            except ValueError as e:
+                raise UsageError(f"IMG2FIG_BUDGET_USD must be a number, got {env!r}") from e
+        else:
+            arg = DEFAULT_BUDGET_USD
+    if not arg > 0:
+        raise UsageError(f"budget must be a positive number of USD, got {arg}")
+    return float(arg)

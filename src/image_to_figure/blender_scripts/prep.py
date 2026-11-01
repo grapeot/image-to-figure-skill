@@ -145,8 +145,12 @@ def main():
     if a.out_glb:
         bpy.ops.object.select_all(action="DESELECT")
         obj.select_set(True)
-        bpy.ops.export_scene.gltf(filepath=os.path.abspath(a.out_glb), use_selection=True, export_format="GLB",
-                                  export_image_format="JPEG", export_jpeg_quality=90)
+        kw = dict(filepath=os.path.abspath(a.out_glb), use_selection=True, export_format="GLB",
+                  export_image_format="JPEG")
+        try:
+            bpy.ops.export_scene.gltf(**kw, export_image_quality=90)
+        except TypeError:  # older exporters
+            bpy.ops.export_scene.gltf(**kw, export_jpeg_quality=90)
 
     H = common.HEIGHT
     blush_pts = []

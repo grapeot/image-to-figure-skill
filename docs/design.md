@@ -57,11 +57,11 @@ Every subcommand prints exactly one JSON object to stdout, including on errors (
 
 ### Spending
 
-Paid commands (`lookdev`, `turnaround`, `edit`, `model`) build the full plan (endpoint, model, size, inputs, full prompt or arguments) and an estimate, and stop there without `--execute`. With `--execute`, the budget (`--budget` or `IMG2FIG_BUDGET_USD`) is checked against the ledger in `spend.json` before the request. Each successful call is recorded with its estimate and, for image calls, the cost implied by the returned token usage. Failed calls are not recorded.
+Paid commands (`lookdev`, `turnaround`, `edit`, `model`) build the full plan (endpoint, model, size, inputs, full prompt or arguments) and an estimate, and stop there without `--execute`. With `--execute`, the budget (`--budget`, else `IMG2FIG_BUDGET_USD`, else $5; it must be positive) is checked against the ledger in `spend.json` before the request, under an exclusive file lock held until the call is recorded, so parallel commands in one work directory cannot overspend. Each call is recorded with its estimate and, for successful image calls, the cost implied by the returned token usage. Failed calls are recorded too (status `failed`, counted at their estimate), because a job can fail after the provider billed it; a 4xx refusal is therefore over-counted, which keeps the guard on the safe side. `img2fig spend` summarises the ledger.
 
 ### Orientation check
 
-Providers disagree on which way their GLBs face after import. `prep --rot auto` renders the model flat-shaded (Workbench, texture colour, Standard view transform, transparent film) from the front at four rotations, normalises each render and the front view to the subject's bounding box, and scores `0.5 * (1 - silhouette IoU) + mean colour difference over the overlap`. The colour term separates front from back, whose silhouettes are near mirror images. If the best two scores are within 8% of each other the result is marked ambiguous and the provider's known orientation is used when there is one.
+Providers disagree on which way their GLBs face after import. `prep --rot auto` renders the model flat-shaded (Workbench, texture colour, Standard view transform, transparent film) from the front at four rotations, normalises each render and the front view to the subject's bounding box, and scores `0.5 * (1 - silhouette IoU) + mean colour difference over the overlap`. The colour term separates front from back, whose silhouettes are near mirror images. If the best two scores are within 8% of each other the result is marked ambiguous and the provider's known orientation is used when there is one (only Tripo's is known).
 
 ### Material grade
 

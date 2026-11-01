@@ -77,6 +77,7 @@ def test_run_provider_downloads_and_picks_largest_glb(fake_fal, tmp_path):
     res = fal3d.run_provider(fake_fal, "tripo", urls, tmp_path)
     assert res["model"].endswith("tripo/model.glb")
     assert (tmp_path / "tripo" / "model.glb").stat().st_size == 2000
+    assert (tmp_path / "tripo" / "files" / "model.glb").exists()  # provider's own model.glb kept intact
     assert (tmp_path / "tripo" / "result.json").exists()
     assert "preview.png" in res["files"]
 
@@ -102,3 +103,18 @@ def test_no_glb_in_result_is_a_warning(fake_fal, tmp_path, monkeypatch):
     res = fal3d.run_provider(fake_fal, "meshy", {v: "u" for v in ("front", "left", "back", "right")}, tmp_path)
     assert res["model"] is None and "warning" in res
 
+
+
+def test_unexpected_local_error_does_not_hide_other_results(fake_fal, tmp_path, monkeypatch):
+    real = fal3d.run_provider
+
+    def flaky(fal, p, *a, **k):
+        if p == "rodin":
+            raise RuntimeError("boom")
+        return real(fal, p, *a, **k)
+
+    monkeypatch.setattr(fal3d, "run_provider", flaky)
+    urls = {v: f"https://x/{v}" for v in ("front", "left", "back", "right")}
+    res = {r["provider"]: r for r in fal3d.run_many(fake_fal, ["tripo", "rodin"], urls, tmp_path, {})}
+    assert res["tripo"]["ok"] and not res["rodin"]["ok"]
+    assert "boom" in res["rodin"]["error"]["message"]

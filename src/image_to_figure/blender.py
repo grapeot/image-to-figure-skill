@@ -66,6 +66,8 @@ def run_script(script: str, args: list[str], log_path: Path, timeout: float = 36
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         raise ToolError(f"Blender timed out after {timeout:.0f}s running {script}", {"cmd": cmd}) from e
+    except OSError as e:
+        raise MissingDependency(f"cannot run Blender at {binary}: {e}", {"env": "IMG2FIG_BLENDER"}) from e
     log_path.write_text(proc.stdout + "\n--- stderr ---\n" + proc.stderr, encoding="utf-8")
     result = None
     if os.path.exists(result_path):

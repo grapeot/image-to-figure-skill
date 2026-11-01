@@ -21,6 +21,7 @@ from .errors import (
     EXIT_INTERNAL,
     EXIT_OK,
     Img2FigError,
+    MissingDependency,
     ProviderError,
     UsageError,
     emit,
@@ -46,10 +47,14 @@ def _wd(args) -> WorkDir:
     return wd
 
 
-def _existing(path: str | Path | None, what: str) -> Path:
+def _existing(path: str | Path | None, what: str, wd: WorkDir | None = None) -> Path:
+    """An existing file. A relative path is tried against the current directory, then the work directory."""
     if path is None:
         raise UsageError(f"{what} is required")
-    p = Path(path).expanduser().resolve()
+    raw = Path(path).expanduser()
+    p = raw.resolve()
+    if not p.is_file() and wd is not None and not raw.is_absolute() and (wd.root / raw).is_file():
+        p = (wd.root / raw).resolve()
     if not p.is_file():
         raise UsageError(f"{what} not found: {p}", {"path": str(p)})
     return p
@@ -105,15 +110,23 @@ def _paid_image(args, wd: WorkDir, *, stage: str, prompt: str, inputs: list[Path
             info = {**e.detail, "within_budget": False}
         return {"dry_run": True, "plan": plan, "estimate_usd": est, "budget": info,
                 "next": f"rerun with --execute to spend about ${costs.round_up_cents(est):.2f}"}
-    info = ledger.check(est, budget)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.with_suffix(".prompt.txt").write_text(prompt + "\n", encoding="utf-8")
-    log(f"{stage}: {plan['endpoint']} {model} {size} {args.quality} -> {out_path.name}")
-    res = images.generate(prompt=prompt, out_path=out_path, size=size, quality=args.quality, model=model,
-                          inputs=inputs)
-    actual = costs.cost_from_usage(res.get("usage"))
-    ledger.record({"stage": stage, "provider": "openai", "model": model, "size": size, "quality": args.quality,
-                   "estimate_usd": est, "actual_usd": actual, "usage": res.get("usage"), "output": str(out_path)})
+    with ledger.locked():
+        info = ledger.check(est, budget)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.with_suffix(".prompt.txt").write_text(prompt + "\n", encoding="utf-8")
+        log(f"{stage}: {plan['endpoint']} {model} {size} {args.quality} -> {out_path.name}")
+        base = {"stage": stage, "provider": "openai", "model": model, "size": size, "quality": args.quality,
+                "estimate_usd": est}
+        try:
+            res = images.generate(prompt=prompt, out_path=out_path, size=size, quality=args.quality, model=model,
+                                  inputs=inputs)
+        except Img2FigError as e:
+            if not isinstance(e, (UsageError, MissingDependency)):  # the request may have been billed
+                ledger.record({**base, "status": "failed", "actual_usd": None, "error": e.message})
+            raise
+        actual = costs.cost_from_usage(res.get("usage"))
+        ledger.record({**base, "status": "ok", "actual_usd": actual, "usage": res.get("usage"),
+                       "output": str(out_path)})
     return {"dry_run": False, "image": str(out_path), "prompt_file": str(out_path.with_suffix(".prompt.txt")),
             "estimate_usd": est, "cost_from_usage_usd": actual, "usage": res.get("usage"),
             "spent_in_workdir_usd": ledger.spent(), "budget": info}
@@ -157,6 +170,13 @@ def cmd_doctor(args) -> dict[str, Any]:
 
 
 def cmd_estimate(args) -> dict[str, Any]:
+    try:
+        return _estimate(args)
+    except ValueError as e:
+        raise UsageError(f"cannot estimate: {e}") from e
+
+
+def _estimate(args) -> dict[str, Any]:
     items = []
     for raw in args.stages.split(","):
         raw = raw.strip()
@@ -201,7 +221,7 @@ def cmd_lookdev(args) -> dict[str, Any]:
 
 def cmd_turnaround(args) -> dict[str, Any]:
     wd = _wd(args)
-    look = _existing(args.lookdev, "--lookdev") if args.lookdev else _latest_png(wd.lookdev, "lookdev_v")
+    look = _existing(args.lookdev, "--lookdev", wd) if args.lookdev else _latest_png(wd.lookdev, "lookdev_v")
     if look is None:
         raise UsageError("no look-dev image: pass --lookdev or run `img2fig lookdev` first")
     refs = [_existing(r, "--ref") for r in args.ref]
@@ -216,7 +236,7 @@ def cmd_turnaround(args) -> dict[str, Any]:
 
 def cmd_edit(args) -> dict[str, Any]:
     wd = _wd(args)
-    src = _existing(args.image, "--image") if args.image else _latest_png(wd.turnaround, "sheet_v")
+    src = _existing(args.image, "--image", wd) if args.image else _latest_png(wd.turnaround, "sheet_v")
     if src is None:
         raise UsageError("no image to edit: pass --image or run `img2fig turnaround` first")
     refs = [_existing(r, "--ref") for r in args.ref]
@@ -233,7 +253,7 @@ def cmd_edit(args) -> dict[str, Any]:
 
 def cmd_crop(args) -> dict[str, Any]:
     wd = _wd(args)
-    sheet = _existing(args.sheet, "--sheet") if args.sheet else _latest_png(wd.turnaround, "sheet_v")
+    sheet = _existing(args.sheet, "--sheet", wd) if args.sheet else _latest_png(wd.turnaround, "sheet_v")
     if sheet is None:
         raise UsageError("no sheet: pass --sheet or run `img2fig turnaround` first")
     out_dir = Path(args.out_dir).resolve() if args.out_dir else wd.views
@@ -270,15 +290,17 @@ def cmd_model(args) -> dict[str, Any]:
             info = {**e.detail, "within_budget": False}
         return {"dry_run": True, "plan": plan, "views": {k: str(v) for k, v in views.items()}, "estimate_usd": est,
                 "budget": info, "next": f"rerun with --execute to spend about ${costs.round_up_cents(est):.2f}"}
-    info = ledger.check(est, budget)
-    fal = fal3d.fal_factory()
-    urls = fal3d.upload_views(fal, views, views_dir / "uploads.json")
-    results = fal3d.run_many(fal, provs, urls, wd.models, opts)
-    for r in results:
-        if r.get("ok"):
-            ledger.record({"stage": "model", "provider": r["provider"], "endpoint": r["endpoint"],
+    with ledger.locked():
+        info = ledger.check(est, budget)
+        fal = fal3d.fal_factory()
+        urls = fal3d.upload_views(fal, views, views_dir / "uploads.json")
+        results = fal3d.run_many(fal, provs, urls, wd.models, opts)
+        for r in results:
+            # failed jobs are recorded too: a job can fail after the provider has billed it
+            ledger.record({"stage": "model", "provider": r["provider"], "endpoint": fal3d.PROVIDERS[r["provider"]][0],
+                           "status": "ok" if r.get("ok") else "failed",
                            "estimate_usd": costs.estimate_model(r["provider"]), "actual_usd": None,
-                           "output": r.get("model")})
+                           "output": r.get("model"), "error": (r.get("error") or {}).get("message")})
     out = {"dry_run": False, "results": results, "estimate_usd": est, "spent_in_workdir_usd": ledger.spent(),
            "budget": info}
     failed = [r for r in results if not r.get("ok")]
@@ -336,7 +358,7 @@ def cmd_prep(args) -> dict[str, Any]:
     for b in args.blush:
         _floats(b, 2, "--blush")
     _floats(args.blush_color, 3, "--blush-color")
-    model = _existing(args.model, "--model") if args.model else _default_model(wd)
+    model = _existing(args.model, "--model", wd) if args.model else _default_model(wd)
     if model is None:
         raise UsageError("no model: pass --model or run `img2fig model` first")
     views_dir = Path(args.views_dir).resolve() if args.views_dir else wd.root / "views"
@@ -380,7 +402,7 @@ def cmd_prep(args) -> dict[str, Any]:
 
 def cmd_render(args) -> dict[str, Any]:
     wd = _wd(args)
-    inp = _existing(args.input, "--input") if args.input else _existing(wd.root / "figure" / "figure.blend",
+    inp = _existing(args.input, "--input", wd) if args.input else _existing(wd.root / "figure" / "figure.blend",
                                                                           "figure/figure.blend")
     views = args.views.split(",")
     bad = [v for v in views if v not in ALL_VIEWS]
@@ -410,11 +432,11 @@ def cmd_sheet(args) -> dict[str, Any]:
 
 def cmd_turntable(args) -> dict[str, Any]:
     wd = _wd(args)
-    inp = _existing(args.input, "--input") if args.input else _existing(wd.root / "figure" / "figure.blend",
+    inp = _existing(args.input, "--input", wd) if args.input else _existing(wd.root / "figure" / "figure.blend",
                                                                           "figure/figure.blend")
+    if args.fps <= 0 or args.frames <= 0 or args.samples <= 0:
+        raise UsageError("--fps, --frames and --samples must be positive")
     if not video_mod.find_ffmpeg():
-        from .errors import MissingDependency
-
         raise MissingDependency("ffmpeg not found on PATH (or set IMG2FIG_FFMPEG)")
     frames_dir = wd.turntable / "frames"
     if frames_dir.exists():
@@ -430,6 +452,22 @@ def cmd_turntable(args) -> dict[str, Any]:
         shutil.rmtree(frames_dir)
     return {**v, "frames": r["frames"], "seconds": round(r["frames"] / args.fps, 2),
             "frames_dir": str(frames_dir) if args.keep_frames else None}
+
+
+def cmd_spend(args) -> dict[str, Any]:
+    wd = _wd(args)
+    ledger = Ledger(wd.ledger_path)
+    entries = ledger.load()["entries"]
+    budget = budget_from(args.budget)
+    spent = ledger.spent()
+    return {"ledger": str(wd.ledger_path), "spent_usd": spent, "budget_usd": budget,
+            "remaining_usd": round(budget - spent, 4), "calls": len(entries),
+            "failed_calls": sum(1 for e in entries if e.get("status") == "failed"),
+            "by_stage": {k: round(sum(float(e.get("actual_usd") if e.get("actual_usd") is not None
+                                            else e.get("estimate_usd", 0)) for e in entries
+                                      if e.get("stage") == k), 4)
+                         for k in sorted({e.get("stage") for e in entries})},
+            "note": "image calls count the cost implied by token usage; 3D calls and failed calls count the estimate"}
 
 
 def cmd_point(args) -> dict[str, Any]:
@@ -449,7 +487,8 @@ def build_parser() -> JsonArgParser:
     common.add_argument("--workdir", help=f"work directory (default $IMG2FIG_WORKDIR or ./{DEFAULT_WORKDIR})")
     paid = JsonArgParser(add_help=False)
     paid.add_argument("--execute", action="store_true", help="actually call the paid API (default: plan only)")
-    paid.add_argument("--budget", type=float, help="USD cap for this work directory (default $IMG2FIG_BUDGET_USD)")
+    paid.add_argument("--budget", type=float,
+                      help="USD cap for this work directory (default $IMG2FIG_BUDGET_USD, else 5)")
     img = JsonArgParser(add_help=False)
     img.add_argument("--quality", default="high", help="low|medium|high|xhigh|max (default high)")
     img.add_argument("--image-model", help=f"default $IMG2FIG_IMAGE_MODEL or {images.DEFAULT_MODEL}")
@@ -552,6 +591,10 @@ def build_parser() -> JsonArgParser:
     s.add_argument("--out")
     s.add_argument("--keep-frames", action="store_true")
     s.set_defaults(func=cmd_turntable)
+
+    s = sub.add_parser("spend", parents=[common], help="money spent from this work directory and budget left")
+    s.add_argument("--budget", type=float)
+    s.set_defaults(func=cmd_spend)
 
     s = sub.add_parser("point", parents=[common], help="front-render pixel to figure fractions (for --blush)")
     s.add_argument("--x", type=float, required=True)

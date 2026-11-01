@@ -196,10 +196,14 @@ def run_provider(
     write_json_atomic(d / "result.json", res)
     files: list[str] = []
     failed: list[dict[str, str]] = []
-    for url in sorted(set(_urls_in(res))):
-        name = url.split("?")[0].rsplit("/", 1)[-1] or "file"
+    fdir = d / "files"  # provider files keep their own names here; model.glb is ours
+    fdir.mkdir(exist_ok=True)
+    for i, url in enumerate(sorted(set(_urls_in(res)))):
+        name = url.split("?")[0].rsplit("/", 1)[-1] or f"file_{i}"
+        if name in files:
+            name = f"{i}_{name}"
         try:
-            downloader(url, d / name)
+            downloader(url, fdir / name)
             files.append(name)
         except Exception as e:  # noqa: BLE001
             failed.append({"url": url, "error": repr(e)})
@@ -207,19 +211,20 @@ def run_provider(
     model = None
     if glbs:
         # prefer the largest GLB (some providers also return a low-poly or base mesh)
-        glbs.sort(key=lambda f: (d / f).stat().st_size, reverse=True)
+        glbs.sort(key=lambda f: (fdir / f).stat().st_size, reverse=True)
         model = d / "model.glb"
         if model.exists() or model.is_symlink():
             model.unlink()
         try:
-            os.link(d / glbs[0], model)
+            os.link(fdir / glbs[0], model)
         except OSError:
-            shutil.copyfile(d / glbs[0], model)
+            shutil.copyfile(fdir / glbs[0], model)
     summary = {
         "provider": provider,
         "endpoint": endpoint,
         "seconds": round(time.time() - t0, 1),
         "result_json": str(d / "result.json"),
+        "files_dir": str(fdir),
         "files": files,
         "model": str(model) if model else None,
         "orientation_hint_deg": rot,
@@ -239,6 +244,9 @@ def run_many(fal: Any, providers: list[str], urls: dict[str, str], out_dir: Path
             return {"ok": True, **run_provider(fal, p, urls, out_dir, opts)}
         except ProviderError as e:
             return {"ok": False, "provider": p, "error": e.to_json()}
+        except Exception as e:  # noqa: BLE001 - one provider's local failure must not hide the others' results
+            return {"ok": False, "provider": p,
+                    "error": {"type": "internal_error", "message": f"{type(e).__name__}: {e}"}}
 
     with ThreadPoolExecutor(max(1, len(providers))) as ex:
         return list(ex.map(one, providers))

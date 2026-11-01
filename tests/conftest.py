@@ -103,7 +103,8 @@ class FakeFal:
         for name, (ep, _, _) in fal3d.PROVIDERS.items():
             if ep == endpoint and name in self.fail_providers:
                 raise FakeHTTPError("Unprocessable", 422, '{"detail":"bad image"}')
-        return {"model_mesh": {"url": f"https://files.example.com/out/{endpoint.replace('/', '_')}_model.glb"},
+        # the main file is literally called model.glb, as some providers name it
+        return {"model_mesh": {"url": f"https://files.example.com/out/{endpoint.replace('/', '_')}/model.glb"},
                 "base": {"url": "https://files.example.com/out/base.glb"},
                 "rendered_image": {"url": "https://files.example.com/out/preview.png"}}
 

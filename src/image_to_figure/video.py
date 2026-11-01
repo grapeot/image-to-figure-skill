@@ -30,7 +30,10 @@ def encode(frames_dir: Path, pattern: str, fps: int, out: Path, log_path: Path) 
         raise MissingDependency("ffmpeg not found on PATH (or set IMG2FIG_FFMPEG)", {"env": "IMG2FIG_FFMPEG"})
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = encode_cmd(ffmpeg, frames_dir, pattern, fps, out)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        raise MissingDependency(f"cannot run ffmpeg at {ffmpeg}: {e}", {"env": "IMG2FIG_FFMPEG"}) from e
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(proc.stdout + "\n--- stderr ---\n" + proc.stderr, encoding="utf-8")
     if proc.returncode != 0 or not out.exists():

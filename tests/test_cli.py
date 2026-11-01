@@ -99,7 +99,8 @@ def test_provider_error_exit_1(run_cli, workdir, tmp_path, fake_openai):
     code, out = run_cli("lookdev", "--workdir", workdir, "--ref", ref, "--execute")
     assert code == 1
     assert out["error"]["detail"]["status_code"] == 429
-    assert not (workdir / "spend.json").exists()
+    entry = json.loads((workdir / "spend.json").read_text())["entries"][0]
+    assert entry["status"] == "failed" and entry["estimate_usd"] > 0  # counted: it may have been billed
 
 
 def test_turnaround_uses_latest_lookdev_and_versions(run_cli, workdir, fake_openai):
@@ -159,7 +160,8 @@ def test_model_bakeoff_partial_failure_exit_1(run_cli, workdir, views, fake_fal)
     results = {r["provider"]: r for r in out["error"]["detail"]["results"]}
     assert results["meshy"]["ok"] is False and results["tripo"]["ok"] is True
     led = json.loads((workdir / "spend.json").read_text())
-    assert {e["provider"] for e in led["entries"]} == {"tripo", "hunyuan", "rodin"}
+    status = {e["provider"]: e["status"] for e in led["entries"]}
+    assert status == {"tripo": "ok", "hunyuan": "ok", "rodin": "ok", "meshy": "failed"}
 
 
 def test_model_without_views_exit_2(run_cli, workdir):
@@ -207,3 +209,67 @@ def _patched(parser, fn):
     for action in parser._subparsers._group_actions:
         action.choices["doctor"].set_defaults(func=fn)
     return parser
+
+
+def test_default_budget_applies(run_cli, workdir, tmp_path, fake_openai):
+    from image_to_figure.workdir import DEFAULT_BUDGET_USD
+
+    ref = tmp_path / "ref.png"
+    Image.new("RGB", (8, 8)).save(ref)
+    code, out = run_cli("lookdev", "--workdir", workdir, "--ref", ref)
+    assert out["budget"]["budget_usd"] == DEFAULT_BUDGET_USD
+    (workdir / "spend.json").write_text(json.dumps({"entries": [{"stage": "x", "estimate_usd": 4.99}]}))
+    code, out = run_cli("lookdev", "--workdir", workdir, "--ref", ref, "--execute")
+    assert code == 3 and fake_openai.calls == []
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-1"])
+def test_invalid_budget_is_usage_error(run_cli, workdir, tmp_path, monkeypatch, value):
+    monkeypatch.setenv("IMG2FIG_BUDGET_USD", value)
+    ref = tmp_path / "ref.png"
+    Image.new("RGB", (8, 8)).save(ref)
+    code, out = run_cli("lookdev", "--workdir", workdir, "--ref", ref)
+    assert code == 2
+
+
+def test_corrupt_ledger_is_usage_error(run_cli, workdir, tmp_path):
+    workdir.mkdir(parents=True)
+    (workdir / "spend.json").write_text("{not json")
+    code, out = run_cli("spend", "--workdir", workdir)
+    assert code == 2 and "ledger" in out["error"]["message"]
+
+
+def test_spend_summary(run_cli, workdir):
+    workdir.mkdir(parents=True)
+    (workdir / "spend.json").write_text(json.dumps({"entries": [
+        {"stage": "lookdev", "estimate_usd": 0.1, "actual_usd": 0.05, "status": "ok"},
+        {"stage": "model", "estimate_usd": 0.6, "actual_usd": None, "status": "failed"}]}))
+    code, out = run_cli("spend", "--workdir", workdir, "--budget", "2")
+    assert code == 0
+    assert out["spent_usd"] == pytest.approx(0.65) and out["remaining_usd"] == pytest.approx(1.35)
+    assert out["failed_calls"] == 1 and out["by_stage"]["model"] == 0.6
+
+
+@pytest.mark.parametrize("stages", ["lookdev=x", "model=nope"])
+def test_estimate_bad_input_exit_2(run_cli, stages):
+    code, _ = run_cli("estimate", "--stages", stages)
+    assert code == 2
+
+
+def test_estimate_bad_quality_exit_2(run_cli):
+    code, _ = run_cli("estimate", "--quality", "foo")
+    assert code == 2
+
+
+def test_relative_sheet_resolves_against_workdir(run_cli, workdir, monkeypatch, tmp_path):
+    draw_sheet(workdir / "turnaround" / "sheet_v1_e1.png")
+    monkeypatch.chdir(tmp_path)  # current directory is not the work directory
+    code, out = run_cli("crop", "--workdir", workdir, "--sheet", "turnaround/sheet_v1_e1.png")
+    assert code == 0, out
+
+
+def test_turntable_rejects_zero_fps(run_cli, workdir, tmp_path):
+    blend = tmp_path / "f.blend"
+    blend.write_bytes(b"")
+    code, out = run_cli("turntable", "--workdir", workdir, "--input", blend, "--fps", "0")
+    assert code == 2

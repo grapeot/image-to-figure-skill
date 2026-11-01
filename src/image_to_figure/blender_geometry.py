@@ -1,7 +1,7 @@
 """Camera geometry shared with blender_scripts/common.py, usable without Blender.
 
 Keep these numbers in sync with HEIGHT, CAMERAS["front"] and ORTHO_SCALE in blender_scripts/common.py
-(tests/test_geometry.py checks that they match).
+(tests/test_orientation_geometry_tools.py checks that they match).
 """
 
 from __future__ import annotations

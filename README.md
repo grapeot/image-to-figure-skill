@@ -11,7 +11,7 @@ An agent skill (`skills/image-to-figure/SKILL.md`) plus a command-line tool (`im
 7. **Review**: renders from the same four angles as the turnaround plus a 3/4 and a face close-up, and a comparison sheet (input views above, renders below).
 8. **Turntable**: a 360-degree video on a clear acrylic display base.
 
-It is built for a coding agent (Claude Code, Codex, Cursor, OpenCode and similar) to drive, with you approving the spending and judging the look. Every command prints one JSON object, uses fixed exit codes, and passes provider and Blender errors through unchanged. Commands that cost money print a plan with a cost estimate and do nothing until you add `--execute`; a per-project budget refuses calls that would exceed it.
+It is built for a coding agent (Claude Code, Codex, Cursor, OpenCode and similar) to drive, with you approving the spending and judging the look. Every command prints one JSON object, uses fixed exit codes, and passes provider and Blender errors through unchanged. Commands that cost money print a plan with a cost estimate and do nothing until you add `--execute`; a per-project budget (default $5) refuses calls that would exceed it, and `img2fig spend` shows what has been spent.
 
 ## Example
 
@@ -25,7 +25,7 @@ An original character generated for this example (left), and the comparison shee
 ## Requirements
 
 - Python 3.10+ and [uv](https://github.com/astral-sh/uv)
-- [Blender](https://www.blender.org/) 4.2 or newer, as a command-line binary (`blender` on PATH, or set `IMG2FIG_BLENDER`)
+- [Blender](https://www.blender.org/) as a command-line binary (tested on 5.2; 4.2 or newer expected to work) (`blender` on PATH, or set `IMG2FIG_BLENDER`)
 - ffmpeg, for the turntable video
 - An OpenAI API key (image stages) and a fal.ai key (3D stage), read from the environment variables `OPENAI_API_KEY` and `FAL_KEY`
 
