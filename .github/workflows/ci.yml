@@ -18,7 +18,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       # setup-uv already created and activated .venv; do not run `uv venv` again.
       - name: Install
-        run: uv pip install -e ".[dev,providers]"
+        run: uv pip install -e ".[dev,providers,print]"
       - name: Lint
         run: uv run ruff check .
       - name: Offline tests
