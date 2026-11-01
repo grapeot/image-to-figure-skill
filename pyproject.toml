@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image-to-figure-skill"
+version = "0.1.0"
+description = "Agent skill + CLI: turn one character image into a 3D collectible figure (look-dev, turnaround, multiview image-to-3D, Blender prep, review renders, turntable)."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "pillow>=10",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+providers = ["openai>=1.60", "fal-client>=0.5"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+img2fig = "image_to_figure.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+image_to_figure = ["blender_scripts/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "blender: needs a local Blender binary (skipped when none is found)",
+    "live: calls paid APIs; runs only with IMG2FIG_LIVE=1 and real keys",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
