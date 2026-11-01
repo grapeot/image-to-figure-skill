@@ -94,7 +94,7 @@ def load_mesh(path: Path, opts: PrintOptions):
         mesh = loaded
     up = opts.up
     if up == "auto":
-        up = "y" if path.suffix.lower() in (".glb", ".gltf") else "z"
+        up = "y" if path.suffix.lower() in (".glb", ".gltf", ".obj") else "z"
     colors = None
     if opts.color:
         try:
@@ -250,7 +250,7 @@ def handle_fragments(solid: np.ndarray, grid: Grid, opts: PrintOptions, report: 
     if n <= 1:
         report.steps.append({"step": "fragments", "found": 0})
         return solid
-    sizes = ndi.sum(np.ones_like(labels, dtype=np.int64), labels, index=np.arange(1, n + 1))
+    sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
     main_label = int(np.argmax(sizes)) + 1
     main = labels == main_label
     dist_to_main = _edt(~main, v)
@@ -336,7 +336,7 @@ def _clusters(mask: np.ndarray, grid: Grid, limit: int = 8) -> tuple[int, list[d
     labels, n = ndi.label(mask, structure=np.ones((3, 3, 3), bool))
     if not n:
         return 0, []
-    sizes = ndi.sum(np.ones_like(labels, dtype=np.int64), labels, index=np.arange(1, n + 1))
+    sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
     out = []
     for lab in np.argsort(sizes)[::-1][:limit]:
         if sizes[lab] * v ** 3 < 0.5:
@@ -473,7 +473,7 @@ def build_field(solid: np.ndarray, grid: Grid, mesh, opts: PrintOptions, report:
         labels, n = ndi.label(cavity)
         holes = []
         if n:
-            sizes = ndi.sum(np.ones_like(labels, dtype=np.int64), labels, index=np.arange(1, n + 1))
+            sizes = np.bincount(labels.ravel(), minlength=n + 1)[1:]
             keep = [lab + 1 for lab in range(n) if sizes[lab] * v ** 3 >= 20.0]  # tiny pockets stay solid
             small = n - len(keep)
             # hollow only the kept cavities: the inner-wall field is applied within a few voxels of them, so small
@@ -596,9 +596,10 @@ def thin_warnings(after: dict[str, Any], opts: PrintOptions) -> list[str]:
                        f"{after['thin_part_regions']} region(s){where}). {scale}. If they must print solid at this "
                        "size, --thicken grows only these parts to the wall and blunts their tips")
     if after["relief_volume_fraction"] > 0.001:
-        out.append(f"{after['relief_volume_fraction'] * 100:.2f}% of the volume is fine surface relief or edges "
-                   f"narrower than {w} mm on a thicker body; left as is (--thicken never grows it). The printer "
-                   "softens what it cannot resolve; a larger print keeps more of it")
+        out.append(f"{after['relief_volume_fraction'] * 100:.2f}% of the volume is fine surface relief, edges, "
+                   f"or short webs (up to about {2 * w:g} mm across) between thicker parts, all narrower than {w} mm; "
+                   "left as is (--thicken never grows it). The printer softens relief it cannot resolve, and a slicer "
+                   "may drop a thin web and leave a hole there; a larger print keeps more of both")
     return out
 
 
@@ -612,11 +613,13 @@ def repair(model: Path, out_dir: Path, opts: PrintOptions, name: str = "figure")
         raise UsageError("--base must be flat, pedestal or none")
     if opts.height_mm <= 0:
         raise UsageError("--height must be positive")
+    if opts.voxel_mm is not None and opts.voxel_mm <= 0:
+        raise UsageError("--voxel must be positive (omit it for the default height / 500)")
+    if opts.min_wall_mm <= 0:
+        raise UsageError("--min-wall must be positive")
     mesh, up = load_mesh(model, opts)
     v = opts.voxel_mm or min(0.6, max(0.1, opts.height_mm / 500))
-    if opts.hollow_wall_mm is not None and opts.hollow_wall_mm < 2 * v:
-        raise UsageError(f"--hollow wall {opts.hollow_wall_mm} mm is below two voxels ({2 * v:.2f} mm); "
-                         "use a thicker wall or a smaller --voxel")
+    v0 = v
     report.input = {"path": str(model), "up_axis": up, **diagnose(mesh),
                     "scaled_bounds_mm": mesh.bounds.round(3).tolist()}
     log(f"print: input {report.input['faces']} faces, watertight={report.input['watertight']}")
@@ -638,8 +641,15 @@ def repair(model: Path, out_dir: Path, opts: PrintOptions, name: str = "figure")
     while grid.size > MAX_VOXELS:
         v *= 1.25
         grid = make_grid(v)
-    if v != (opts.voxel_mm or v):
-        report.warnings.append(f"voxel size raised to {v:.3f} mm to stay under {MAX_VOXELS:,} voxels")
+    if v != v0:
+        report.warnings.append(f"voxel size raised from {v0:.3f} to {v:.3f} mm to stay under {MAX_VOXELS:,} voxels; "
+                               "details under one voxel are lost")
+    if opts.hollow_wall_mm is not None and opts.hollow_wall_mm < 2 * v:
+        raise UsageError(f"--hollow wall {opts.hollow_wall_mm} mm is below two voxels ({2 * v:.2f} mm); "
+                         "use a thicker wall or a smaller --voxel")
+    if opts.hollow_wall_mm is not None and opts.drain_hole_mm < 2 * v:
+        report.warnings.append(f"--drain-hole {opts.drain_hole_mm} mm is under two voxels ({2 * v:.2f} mm) and may "
+                               "close up; use at least 2 mm for resin to drain")
     log(f"print: grid {grid.shape} at {v:.3f} mm")
 
     solid = voxelize(mesh, grid, report)
@@ -649,9 +659,12 @@ def repair(model: Path, out_dir: Path, opts: PrintOptions, name: str = "figure")
     if opts.thicken:
         solid, added = thicken_parts(solid, parts, grid, opts.min_wall_mm)
         report.steps.append({"step": "thicken", "added_mm3": round(added * v ** 3, 3),
+                             "thin_part_volume_mm3": before["thin_part_volume_mm3"],
                              "thin_part_regions": before["thin_part_regions"],
                              "relief_left_mm3": round(float(relief.sum() * v ** 3), 3),
-                             "note": f"thin parts grown towards {opts.min_wall_mm} mm; surface relief left as is"})
+                             "note": f"thin parts grown towards {opts.min_wall_mm} mm (all of thin_part_volume, "
+                                     "including regions under 0.5 mm3 that thin_part_regions does not count); "
+                                     "surface relief left as is"})
         if added:
             solid = ndi.binary_fill_holes(solid)  # growth can close small pockets; fill them
 

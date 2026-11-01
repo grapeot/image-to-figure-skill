@@ -48,7 +48,7 @@ def test_overlapping_shells_become_one_watertight_part(tmp_path):
     assert c["watertight"] and c["is_volume"] and c["printable"]
     assert "NoError" in c["manifold3d_status"]
     assert c["parts"] == 1
-    assert res["input"]["watertight"] is True or res["input"]["components"] >= 1
+    assert res["input"]["components"] > 1  # the input really was several overlapping shells
     assert res["output"]["height_mm"] == pytest.approx(40, abs=0.6)
     assert res["output"]["bounds_mm"][0][2] == pytest.approx(0, abs=1e-6)
 
@@ -305,3 +305,38 @@ def test_cli_print_missing_extra(run_cli, tmp_path, monkeypatch):
     code, out = run_cli("print", "--workdir", tmp_path / "w", "--model", src, "--no-preview")
     assert code == 4
 
+
+
+def test_bad_numbers_are_usage_errors(tmp_path):
+    from image_to_figure.errors import UsageError
+
+    cube = trimesh.creation.box(extents=(10, 10, 10))
+    for kw in ({"voxel_mm": -0.2}, {"voxel_mm": 0.0}, {"min_wall_mm": 0.0}, {"min_wall_mm": -1.0}):
+        with pytest.raises(UsageError):
+            run(tmp_path, cube, height_mm=10, **kw)
+
+
+def test_small_drain_hole_warns(tmp_path):
+    cube = trimesh.creation.box(extents=(20, 20, 20))
+    cube.apply_translation((0, 0, 10))
+    res = run(tmp_path, cube, height_mm=20, voxel_mm=0.4, hollow_wall_mm=2.0, drain_hole_mm=0.5)
+    assert any("--drain-hole" in w for w in res["warnings"])
+
+
+def test_cli_check_failure_still_writes_report(run_cli, tmp_path, monkeypatch):
+    from image_to_figure.errors import CheckFailed
+
+    def failing_repair(model, out_dir, opts, name="figure"):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stl = out_dir / f"{name}.stl"
+        trimesh.creation.box(extents=(10, 10, 10)).export(stl)
+        raise CheckFailed("repaired mesh did not pass the watertight/manifold checks",
+                          {"output": {"files": {"stl": str(stl)}}, "warnings": []})
+
+    monkeypatch.setattr(print3d, "repair", failing_repair)
+    src = save(figure_like(), tmp_path / "fig.stl")
+    code, out = run_cli("print", "--workdir", tmp_path / "w", "--model", src)
+    assert code == 6, out
+    report = json.loads((tmp_path / "w" / "print" / "figure_report.json").read_text())
+    assert report["output"]["files"]["stl"].endswith("figure.stl")
+    assert (tmp_path / "w" / "print" / "figure_section.png").is_file()

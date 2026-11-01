@@ -467,9 +467,26 @@ def cmd_print(args) -> dict[str, Any]:
         fragments=args.fragments, merge_gap_mm=args.merge_gap, hollow_wall_mm=args.hollow,
         drain_hole_mm=args.drain_hole, base=args.base, pedestal_height_mm=args.pedestal_height,
         pedestal_margin_mm=args.pedestal_margin, color=args.color, smooth_iterations=args.smooth)
-    res = print3d.repair(model, out_dir, opts, name=args.name)
+    from .errors import CheckFailed
+    from .workdir import write_json_atomic
+
+    report_path = out_dir / f"{args.name}_report.json"
+    try:
+        res = print3d.repair(model, out_dir, opts, name=args.name)
+    except CheckFailed as e:
+        # the files are already written; keep the report and section so the failure can be diagnosed
+        e.detail["report"] = str(report_path)
+        stl_path = Path(e.detail.get("output", {}).get("files", {}).get("stl", ""))
+        if stl_path.is_file():
+            try:
+                e.detail.setdefault("previews", {}).update(
+                    print3d.section_image(stl_path, out_dir / f"{args.name}_section.png"))
+            except Exception as err:  # noqa: BLE001 - diagnostics only
+                e.detail.setdefault("warnings", []).append(f"section image failed: {type(err).__name__}: {err}")
+        write_json_atomic(report_path, e.detail)
+        raise
     stl = Path(res["output"]["files"]["stl"])
-    res["report"] = str(out_dir / f"{args.name}_report.json")
+    res["report"] = str(report_path)
     if not args.no_preview:
         res["previews"] = {}
         res["previews"].update(print3d.section_image(stl, out_dir / f"{args.name}_section.png"))
@@ -478,8 +495,6 @@ def cmd_print(args) -> dict[str, Any]:
             res["previews"]["renders"] = r["renders"]
         else:
             res["warnings"].append("no Blender found: preview renders skipped (section image still written)")
-    from .workdir import write_json_atomic
-
     write_json_atomic(Path(res["report"]), res)
     return res
 
