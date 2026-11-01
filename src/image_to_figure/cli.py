@@ -631,7 +631,9 @@ def build_parser() -> JsonArgParser:
     s.add_argument("--rot", type=float, default=0.0,
                    help="rotate about the vertical axis so the figure faces the front camera (raw Tripo GLB: -90)")
     s.add_argument("--min-wall", type=float, default=1.0, help="thinnest feature to accept, mm (default 1.0)")
-    s.add_argument("--thicken", action="store_true", help="grow features thinner than --min-wall")
+    s.add_argument("--thicken", action="store_true",
+                   help="grow thin parts (sheets, fins, strands sticking out from the body) to --min-wall; blunts "
+                        "their tips; surface relief is never grown. For FDM, printing larger is usually better")
     s.add_argument("--fragments", default="merge", choices=["merge", "remove", "keep"])
     s.add_argument("--merge-gap", type=float, default=2.0,
                    help="attach floating parts closer than this, mm; farther ones are kept and reported")

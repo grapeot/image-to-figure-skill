@@ -92,20 +92,129 @@ def test_fragments_merged_removed_kept(tmp_path):
     assert any("loose piece" in w for w in res["warnings"])
 
 
-def test_thin_plate_flagged_and_thickened(tmp_path):
+def fin_on_block(thickness):
     base = trimesh.creation.box(extents=(20, 20, 6))
     base.apply_translation((0, 0, 3))
-    fin = trimesh.creation.box(extents=(0.6, 16, 14))  # a 0.6 mm fin
+    fin = trimesh.creation.box(extents=(thickness, 16, 14))
     fin.apply_translation((0, 0, 13))
-    mesh = trimesh.util.concatenate([base, fin])
-    kw = dict(height_mm=20, base="none", voxel_mm=0.2, min_wall_mm=1.2)
-    res = run(tmp_path, mesh, **kw)
-    thin = res["checks"]["wall_thickness"]
-    assert thin["thin_volume_fraction"] > 0.02
-    assert any("thinner than" in w for w in res["warnings"])
-    res2 = run(tmp_path, mesh, thicken=True, **kw)
-    assert res2["output"]["volume_mm3"] > res["output"]["volume_mm3"]
-    assert res2["checks"]["wall_thickness"]["thin_volume_fraction"] < thin["thin_volume_fraction"] / 2
+    return trimesh.util.concatenate([base, fin])
+
+
+def width_at(path, z, x_lo=-1e9, x_hi=1e9):
+    """Extent along X of the horizontal section at height z, limited to x_lo < x < x_hi."""
+    sec = trimesh.load(path).section(plane_origin=[0, 0, z], plane_normal=[0, 0, 1])
+    if sec is None:
+        return None
+    x = sec.vertices[:, 0]
+    x = x[(x > x_lo) & (x < x_hi)]
+    return float(x.max() - x.min()) if len(x) else None
+
+
+THIN = dict(base="none", voxel_mm=0.2, min_wall_mm=1.2)
+
+
+def test_thin_fin_flagged_and_thickened_to_min_wall(tmp_path):
+    res = run(tmp_path, fin_on_block(0.6), height_mm=20, **THIN)
+    wt = res["checks"]["wall_thickness"]
+    assert wt["thin_part_volume_fraction"] > 0.02 and wt["thin_part_regions"] == 1
+    assert wt["largest_thin_parts"][0]["centre_mm"][2] > 8  # the fin, not the block's edges
+    assert any("parts thinner than 1.2 mm" in w and "--height" in w for w in res["warnings"])
+    assert width_at(res["output"]["files"]["stl"], 13) < 0.8
+
+    res2 = run(tmp_path, fin_on_block(0.6), height_mm=20, thicken=True, **THIN)
+    step = next(s for s in res2["steps"] if s["step"] == "thicken")
+    assert step["added_mm3"] > 50
+    width = width_at(res2["output"]["files"]["stl"], 13)
+    assert 1.2 - 0.2 <= width <= 1.2 + 0.3  # grown to about min_wall, not 0.6 mm plus a full wall (1.8 mm)
+    assert res2["checks"]["wall_thickness"]["thin_part_volume_fraction"] < 0.001
+    assert res2["checks"]["printable"] and res2["checks"]["parts"] == 1
+    assert not any("--thicken grows" in w or "rerun" in w for w in res2["warnings"])
+
+
+def test_thick_fin_not_thickened(tmp_path):
+    res = run(tmp_path, fin_on_block(1.5), height_mm=20, thicken=True, **THIN)
+    assert next(s for s in res["steps"] if s["step"] == "thicken")["added_mm3"] == 0
+    assert res["checks"]["wall_thickness"]["thin_part_regions"] == 0
+
+
+def relief_sphere(radius=6.0):
+    """A sphere with raised dots (0.35 mm radius, 0.3 mm proud) and two raised rings (0.4 mm wide and proud).
+
+    Placed so the bounding box is the sphere's: the print frame then keeps the sphere centred at (0, 0, radius).
+    """
+    parts = [trimesh.creation.icosphere(subdivisions=5, radius=radius)]
+    for az in range(0, 360, 45):
+        for lat in (25, 50):
+            a, b = math.radians(az), math.radians(lat)
+            d = np.array([math.cos(b) * math.cos(a), math.cos(b) * math.sin(a), math.sin(b)])
+            dot = trimesh.creation.icosphere(subdivisions=2, radius=0.35)
+            dot.apply_translation(d * (radius + 0.3 - 0.35))
+            parts.append(dot)
+    for z in (-2.0, -4.0):
+        r = math.sqrt(radius ** 2 - z ** 2)
+        ring = trimesh.creation.annulus(r_min=r - 0.6, r_max=r + 0.4, height=0.4, sections=96)
+        ring.apply_translation((0, 0, z))
+        parts.append(ring)
+    mesh = trimesh.util.concatenate(parts)
+    mesh.apply_translation((0, 0, radius))
+    return mesh
+
+
+def test_thicken_leaves_surface_relief_alone(tmp_path):
+    """Regression: thickening used to grow raised relief on a thick body into round bumps all over the surface."""
+    kw = dict(height_mm=12, base="none", voxel_mm=0.15, min_wall_mm=1.2)
+    plain = run(tmp_path, relief_sphere(), **kw)
+    thick = run(tmp_path, relief_sphere(), thicken=True, **kw)
+    before = next(s for s in thick["steps"] if s["step"] == "wall_thickness_before")
+    assert before["thin_volume_fraction"] > 0 and before["thin_part_regions"] == 0  # relief seen, nothing to grow
+    assert next(s for s in thick["steps"] if s["step"] == "thicken")["added_mm3"] == 0
+    assert thick["output"]["volume_mm3"] == pytest.approx(plain["output"]["volume_mm3"], rel=1e-3)
+    assert any("surface relief" in w for w in thick["warnings"])
+
+    def radial(res):
+        verts = trimesh.load(res["output"]["files"]["stl"]).vertices
+        return verts, np.linalg.norm(verts - [0, 0, 6.0], axis=1)
+
+    _, r_plain = radial(plain)
+    verts, r_thick = radial(thick)
+    # no bumps: nothing sticks out farther than without --thicken (the old code grew relief by 0.6 mm and more)
+    assert r_thick.max() <= r_plain.max() + 0.02
+    assert r_thick.max() < 6.0 + 0.5  # the rings' outer corners reach about 6.3 mm from the centre
+    # the relief survives: rings and dots still stand out from the sphere
+    ring = np.abs(verts[:, 2] - 6.0 + 2.0) < 0.1
+    assert np.linalg.norm(verts[ring][:, :2], axis=1).max() > math.sqrt(36 - 4) + 0.15
+    upper = verts[:, 2] > 6.0 + 2.0  # above the rings: sphere and dots only
+    assert r_thick[upper].max() > 6.0 + 0.08
+
+
+def test_short_relief_kept_tall_ridge_thickened(tmp_path):
+    block = trimesh.creation.box(extents=(12, 12, 8))
+    block.apply_translation((0, 0, 4))
+    short = trimesh.creation.box(extents=(0.5, 10, 0.8))  # 0.8 mm proud: relief
+    short.apply_translation((-3, 0, 8.4))
+    tall = trimesh.creation.box(extents=(0.5, 10, 3.0))  # 3 mm proud: a fin
+    tall.apply_translation((3, 0, 9.5))
+    res = run(tmp_path, trimesh.util.concatenate([block, short, tall]), height_mm=11, thicken=True,
+              base="none", voxel_mm=0.15, min_wall_mm=1.2)
+    stl = res["output"]["files"]["stl"]
+    assert width_at(stl, 8.5, -5, -1) < 0.6  # short ridge left as is
+    assert width_at(stl, 10.0, 1, 5) > 1.0  # tall ridge grown towards 1.2 mm
+    assert res["checks"]["wall_thickness"]["thin_part_volume_fraction"] < 0.001
+
+
+def test_thin_warnings_text():
+    stats = {"thin_part_volume_fraction": 0.007, "thin_part_regions": 12, "relief_volume_fraction": 0.004,
+             "largest_thin_parts": [{"volume_mm3": 9.0, "centre_mm": [1.0, 2.0, 3.0]}]}
+    plain = print3d.thin_warnings(stats, PrintOptions(min_wall_mm=1.2))
+    assert len(plain) == 2
+    assert "0.70%" in plain[0] and "[1.0, 2.0, 3.0]" in plain[0] and "--height" in plain[0]
+    assert "--thicken" in plain[0] and "slicer" in plain[0]
+    assert "relief" in plain[1] and "never grows" in plain[1]
+    after = print3d.thin_warnings(stats, PrintOptions(min_wall_mm=1.2, thicken=True))
+    assert after[0].startswith("after --thicken") and "--height" in after[0] and "slicer" in after[0]
+    assert "rerun" not in after[0] and "--thicken grows" not in after[0]
+    quiet = {**stats, "thin_part_volume_fraction": 0.0005, "relief_volume_fraction": 0.0}
+    assert print3d.thin_warnings(quiet, PrintOptions()) == []
 
 
 def test_hollow_with_drain_hole(tmp_path):

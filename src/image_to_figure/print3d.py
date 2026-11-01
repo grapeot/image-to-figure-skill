@@ -166,15 +166,6 @@ def _edt(mask: np.ndarray, voxel: float) -> np.ndarray:
     return ndi.distance_transform_edt(mask).astype(np.float32) * voxel
 
 
-def _ball_open(solid: np.ndarray, r_mm: float, voxel: float) -> np.ndarray:
-    """Morphological opening with a ball of radius r (via distance transforms, exact for any radius)."""
-    inside = _edt(solid, voxel)
-    centres = inside >= r_mm
-    if not centres.any():
-        return np.zeros_like(solid)
-    return _edt(~centres, voxel) <= r_mm
-
-
 def _surface_voxels(mesh, grid: Grid) -> tuple[np.ndarray, int]:
     trimesh, _, _, _ = _deps()
     v = grid.voxel
@@ -301,37 +292,89 @@ def handle_fragments(solid: np.ndarray, grid: Grid, opts: PrintOptions, report: 
     return out
 
 
-def thin_regions(solid: np.ndarray, grid: Grid, min_wall: float) -> tuple[np.ndarray, dict[str, Any]]:
-    """Voxels of the solid that a ball of diameter min_wall cannot reach: features thinner than min_wall."""
+# How far (in voxels) the distance to the surface at voxel centres overstates a wall's half-thickness. In the final
+# solid (field <= 0 at voxel centres) it is 0 to 0.5 voxel depending on parity, and the check takes the lenient end
+# (resolution is a voxel either way). The raw voxel solid marks every voxel the surface touches and reads about one
+# voxel more; using a full voxel there makes the check before thickening at least as strict as the one after it.
+FINAL_BIAS = 0.0
+RAW_BIAS = 1.0
+
+
+def thin_masks(solid: np.ndarray, v: float, min_wall: float, bias: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split what a ball of diameter min_wall cannot reach into thin parts and surface relief.
+
+    `thin` is every voxel of the solid outside the ball opening: thin sheets and strands, but also raised relief
+    (embossed lines, dots, strand edges) and convex edges on a thick body. Only `parts` may be thickened: thin
+    voxels that reach farther than min_wall from the thick core, i.e. a sheet, fin or strand whose two surfaces are
+    close together, plus their roots (a geodesic dilation inside the thin mask). Relief on a thick body stays within
+    its own height of the core (a convex corner within 0.73 x the ball radius), so it never qualifies; growing relief
+    is what turns fine surface detail into round bumps. `bias` (voxels) is how much the distance to the surface at
+    voxel centres overstates the true half-thickness for this kind of solid. Also returns that distance.
+    """
+    _, ndi, _, _ = _deps()
+    r = min_wall / 2
+    eps = 1e-3 * v  # distances are float32 multiples of the voxel
+    inside = _edt(solid, v)
+    centres = inside >= r + bias * v - eps
+    if not centres.any():  # nothing is thick enough: all of it is thin
+        return solid.copy(), solid.copy(), inside
+    opened = _edt(~centres, v) <= r + bias * v + eps
+    thin = solid & ~opened
+    seeds = thin & (_edt(~opened, v) > min_wall + eps)
+    if seeds.any():
+        parts = ndi.binary_dilation(seeds, structure=np.ones((3, 3, 3), bool),
+                                    iterations=int(math.ceil(min_wall / v)) + 1, mask=thin)
+    else:
+        parts = seeds
+    return thin, parts, inside
+
+
+def _clusters(mask: np.ndarray, grid: Grid, limit: int = 8) -> tuple[int, list[dict[str, Any]]]:
+    """Number of 26-connected regions of at least 0.5 mm3, and the largest ones with their centres."""
     _, ndi, _, _ = _deps()
     v = grid.voxel
-    opened = _ball_open(solid, min_wall / 2, v)
-    thin = solid & ~opened
+    labels, n = ndi.label(mask, structure=np.ones((3, 3, 3), bool))
+    if not n:
+        return 0, []
+    sizes = ndi.sum(np.ones_like(labels, dtype=np.int64), labels, index=np.arange(1, n + 1))
+    out = []
+    for lab in np.argsort(sizes)[::-1][:limit]:
+        if sizes[lab] * v ** 3 < 0.5:
+            break
+        idx = np.argwhere(labels == lab + 1)
+        out.append({"volume_mm3": round(float(sizes[lab] * v ** 3), 3),
+                    "centre_mm": (grid.origin + (idx.mean(axis=0) + 0.5) * v).round(2).tolist()})
+    return int((sizes * v ** 3 >= 0.5).sum()), out
+
+
+def thin_regions(solid: np.ndarray, grid: Grid, min_wall: float,
+                 bias: float = FINAL_BIAS) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Thin parts (thickening candidates), surface relief, and statistics for the report."""
+    _, ndi, _, _ = _deps()
+    v = grid.voxel
+    thin, parts, inside = thin_masks(solid, v, min_wall, bias)
+    relief = thin & ~parts
     total = int(solid.sum())
-    inside = _edt(solid, v)
     ridge = solid & (ndi.maximum_filter(inside, size=3) <= inside + 1e-6) & (inside > 0)
-    t = 2 * inside[ridge]
-    labels, n = ndi.label(thin, structure=np.ones((3, 3, 3), bool))
-    clusters = []
-    significant = 0
-    if n:
-        sizes = ndi.sum(np.ones_like(labels, dtype=np.int64), labels, index=np.arange(1, n + 1))
-        significant = int((sizes * v ** 3 >= 0.5).sum())
-        for lab in np.argsort(sizes)[::-1][:8]:
-            if sizes[lab] * v ** 3 < 0.5:
-                break
-            idx = np.argwhere(labels == lab + 1)
-            clusters.append({
-                "volume_mm3": round(float(sizes[lab] * v ** 3), 3),
-                "centre_mm": (grid.origin + (idx.mean(axis=0) + 0.5) * v).round(2).tolist(),
-            })
+    t = np.maximum(2 * (inside[ridge] - bias * v), v)
+    n_parts, clusters = _clusters(parts, grid)
+
+    def frac(mask):
+        return round(float(mask.sum() / total), 5) if total else 0.0
+
     stats = {
         "min_wall_mm": min_wall,
         "thin_volume_mm3": round(float(thin.sum() * v ** 3), 3),
-        "thin_volume_fraction": round(float(thin.sum() / total), 5) if total else 0.0,
-        "thin_regions": significant,
-        "thin_regions_note": "regions of at least 0.5 mm3; smaller specks are surface texture",
-        "largest_thin_regions": clusters,
+        "thin_volume_fraction": frac(thin),
+        "thin_part_volume_mm3": round(float(parts.sum() * v ** 3), 3),
+        "thin_part_volume_fraction": frac(parts),
+        "thin_part_regions": n_parts,
+        "largest_thin_parts": clusters,
+        "relief_volume_fraction": frac(relief),
+        "note": f"thin_volume counts everything a {min_wall} mm ball cannot reach. Thin parts are sheets, fins and "
+                f"strands that stick out more than {min_wall} mm from a thicker body with both surfaces close "
+                "together (the only regions --thicken grows); relief is raised detail and convex edges on a thicker "
+                "body (left as is). Regions are counted from 0.5 mm3.",
         "thinnest_feature_mm": {
             "p1": round(float(np.percentile(t, 1)), 3) if t.size else None,
             "p5": round(float(np.percentile(t, 5)), 3) if t.size else None,
@@ -339,7 +382,44 @@ def thin_regions(solid: np.ndarray, grid: Grid, min_wall: float) -> tuple[np.nda
                     f"so the minimum is not meaningful; resolution about one voxel ({v:.2f} mm)",
         },
     }
-    return thin, stats
+    return parts, relief, stats
+
+
+def thicken_parts(solid: np.ndarray, parts: np.ndarray, grid: Grid, min_wall: float) -> tuple[np.ndarray, int]:
+    """Grow thin parts of the raw voxel solid to at least min_wall, never surface relief.
+
+    Each thin-part voxel grows by (min_wall / 2 - local half-thickness), rounded up to whole voxels, where the local
+    half-thickness is the largest distance to the surface within that radius. A 0.6 mm fin becomes about 1.2 mm,
+    not 0.6 mm plus a full wall. Work is done on the bounding box of the parts. Returns the new solid and the number
+    of voxels added.
+    """
+    _, ndi, _, _ = _deps()
+    v = grid.voxel
+    if not parts.any():
+        return solid, 0
+    target = min_wall / 2
+    k = int(math.ceil(target / v))
+    pad = k + 2
+    idx = np.argwhere(parts)
+    lo = np.maximum(idx.min(axis=0) - pad, 0)
+    hi = np.minimum(idx.max(axis=0) + pad + 1, np.array(solid.shape))
+    box = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
+    sub, sub_parts = solid[box], parts[box]
+    zz, yy, xx = np.mgrid[-k:k + 1, -k:k + 1, -k:k + 1]
+    ball = (zz ** 2 + yy ** 2 + xx ** 2) <= k * k
+    half = ndi.maximum_filter(_edt(sub, v), footprint=ball) - RAW_BIAS * v
+    need = np.where(sub_parts, np.clip(target - half, 0.0, target), 0.0)
+    grown = np.zeros_like(sub)
+    eps = 1e-3 * v  # distances are float32 multiples of the voxel
+    for level in np.arange(1, k + 1) * v:  # whole-voxel growth levels, rounded up
+        src = sub_parts & (need > level - v + eps)
+        if not src.any():
+            break
+        grown |= _edt(~src, v) <= level + eps
+    added = int((grown & ~sub).sum())
+    out = solid.copy()
+    out[box] = sub | grown
+    return out, added
 
 
 # ---------------------------------------------------------------- field operations
@@ -497,6 +577,31 @@ def transfer_colors(src, dst) -> bool:
 # ---------------------------------------------------------------- main entry
 
 
+def thin_warnings(after: dict[str, Any], opts: PrintOptions) -> list[str]:
+    """What is still thin in the result, and what to do about it. Never suggests --thicken when it was used."""
+    w = opts.min_wall_mm
+    out = []
+    frac = after["thin_part_volume_fraction"]
+    if frac > 0.001:
+        where = "; largest at " + ", ".join(str(c["centre_mm"]) for c in after["largest_thin_parts"][:3]) \
+            if after["largest_thin_parts"] else ""
+        scale = (f"Thin parts scale with the figure: printing larger (raise --height above {opts.height_mm:g}) "
+                 "is the most reliable fix, and the slicer's thin-wall handling (Arachne walls, 'detect thin walls')"
+                 " prints most of the rest")
+        if opts.thicken:
+            out.append(f"after --thicken, {frac * 100:.2f}% of the volume is still in parts thinner than {w} mm "
+                       f"({after['thin_part_regions']} region(s){where}). {scale}; check them in the slicer preview")
+        else:
+            out.append(f"{frac * 100:.2f}% of the volume is in parts thinner than {w} mm (sheets, fins or strands; "
+                       f"{after['thin_part_regions']} region(s){where}). {scale}. If they must print solid at this "
+                       "size, --thicken grows only these parts to the wall and blunts their tips")
+    if after["relief_volume_fraction"] > 0.001:
+        out.append(f"{after['relief_volume_fraction'] * 100:.2f}% of the volume is fine surface relief or edges "
+                   f"narrower than {w} mm on a thicker body; left as is (--thicken never grows it). The printer "
+                   "softens what it cannot resolve; a larger print keeps more of it")
+    return out
+
+
 def repair(model: Path, out_dir: Path, opts: PrintOptions, name: str = "figure") -> dict[str, Any]:
     trimesh, ndi, _, m3 = _deps()
     t0 = time.time()
@@ -523,35 +628,37 @@ def repair(model: Path, out_dir: Path, opts: PrintOptions, name: str = "figure")
         lo[:2] = np.minimum(lo[:2], c - rad)
         hi[:2] = np.maximum(hi[:2], c + rad)
         lo[2] -= opts.pedestal_height_mm + 1.0
-    if opts.thicken:
-        lo -= opts.min_wall_mm
-        hi += opts.min_wall_mm
-    grid = Grid(lo, hi, v, pad=4)
+
+    def make_grid(v):
+        # room for thickening as whole voxels of padding, so the lattice (and every untouched region) is the same
+        # with and without --thicken
+        return Grid(lo, hi, v, pad=4 + (int(math.ceil(opts.min_wall_mm / v)) if opts.thicken else 0))
+
+    grid = make_grid(v)
     while grid.size > MAX_VOXELS:
         v *= 1.25
-        grid = Grid(lo, hi, v, pad=4)
+        grid = make_grid(v)
     if v != (opts.voxel_mm or v):
         report.warnings.append(f"voxel size raised to {v:.3f} mm to stay under {MAX_VOXELS:,} voxels")
     log(f"print: grid {grid.shape} at {v:.3f} mm")
 
     solid = voxelize(mesh, grid, report)
     solid = handle_fragments(solid, grid, opts, report)
-    thin, before = thin_regions(solid, grid, opts.min_wall_mm)
+    parts, relief, before = thin_regions(solid, grid, opts.min_wall_mm, bias=RAW_BIAS)
     report.steps.append({"step": "wall_thickness_before", **before})
-    if opts.thicken and thin.any():
-        r = opts.min_wall_mm / 2
-        grown = _edt(~thin, v) <= r
-        added = int((grown & ~solid).sum())
-        solid = solid | grown
+    if opts.thicken:
+        solid, added = thicken_parts(solid, parts, grid, opts.min_wall_mm)
         report.steps.append({"step": "thicken", "added_mm3": round(added * v ** 3, 3),
-                             "note": f"thin regions grown by {r:.2f} mm on every side"})
-        # anything the thickening joined is now one part; recompute fragments in case it bridged loose crumbs
-        solid = ndi.binary_fill_holes(solid)
+                             "thin_part_regions": before["thin_part_regions"],
+                             "relief_left_mm3": round(float(relief.sum() * v ** 3), 3),
+                             "note": f"thin parts grown towards {opts.min_wall_mm} mm; surface relief left as is"})
+        if added:
+            solid = ndi.binary_fill_holes(solid)  # growth can close small pockets; fill them
 
     f = build_field(solid, grid, mesh, opts, report)
     final_solid = f <= 0
-    _, after = thin_regions(final_solid, grid, opts.min_wall_mm)
-    del solid, thin, final_solid
+    _, _, after = thin_regions(final_solid, grid, opts.min_wall_mm)
+    del solid, parts, relief, final_solid
 
     raw = field_to_mesh(f, grid, report)
     del f
@@ -659,11 +766,7 @@ def repair(model: Path, out_dir: Path, opts: PrintOptions, name: str = "figure")
     }
     printable = report.checks["watertight"] and report.checks["is_volume"] and "NoError" in status
     report.checks["printable"] = bool(printable)
-    if after["thin_volume_fraction"] > 0.001:
-        report.warnings.append(
-            f"{after['thin_volume_fraction'] * 100:.2f}% of the volume is thinner than {opts.min_wall_mm} mm "
-            f"({after['thin_regions']} region(s) of 0.5 mm3 or more); check them in the slicer or rerun with --thicken"
-        )
+    report.warnings.extend(thin_warnings(after, opts))
     if parts and parts > 1:
         report.warnings.append(f"the result has {parts} separate parts")
     result = {"seconds": round(time.time() - t0, 1), **asdict(report)}
