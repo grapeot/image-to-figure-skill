@@ -84,12 +84,11 @@ def _paid_image(args, wd: WorkDir, *, stage: str, prompt: str, inputs: list[Path
         costs.parse_size(size)
     except ValueError as e:
         raise UsageError(str(e)) from e
-    if args.quality not in images.QUALITIES:
-        raise UsageError(f"--quality must be one of {images.QUALITIES}")
+    model = images.image_model(args.image_model)
+    images.check_quality(model, args.quality)
     est = costs.estimate_image(size, args.quality, len(inputs), len(prompt))
     ledger = Ledger(wd.ledger_path)
     budget = budget_from(args.budget)
-    model = images.image_model(args.image_model)
     plan = {
         "stage": stage,
         "provider": "openai",
@@ -535,7 +534,7 @@ def build_parser() -> JsonArgParser:
     paid.add_argument("--budget", type=float,
                       help="USD cap for this work directory (default $IMG2FIG_BUDGET_USD, else 5)")
     img = JsonArgParser(add_help=False)
-    img.add_argument("--quality", default="high", help="low|medium|high|xhigh|max (default high)")
+    img.add_argument("--quality", default="high", help="low|medium|high|xhigh|max (default high; xhigh/max need a gpt-image-2.5 model)")
     img.add_argument("--image-model", help=f"default $IMG2FIG_IMAGE_MODEL or {images.DEFAULT_MODEL}")
     img.add_argument("--prompt-file", help="use this prompt instead of the built-in template")
     img.add_argument("--out", help="output path (default: next version in the work directory)")

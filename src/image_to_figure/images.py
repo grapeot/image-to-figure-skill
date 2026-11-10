@@ -11,10 +11,23 @@ from .errors import MissingDependency, ProviderError, UsageError
 
 DEFAULT_MODEL = "gpt-image-2.6-sunburst"
 QUALITIES = ("low", "medium", "high", "xhigh", "max")
+# GPT Image 2.6 returns 400 for xhigh/max; only gpt-image-2.5-* accepts them.
+NO_XHIGH_MAX_PREFIX = "gpt-image-2.6"
 
 
 def image_model(arg: str | None) -> str:
     return arg or os.environ.get("IMG2FIG_IMAGE_MODEL") or DEFAULT_MODEL
+
+
+def check_quality(model: str, quality: str) -> None:
+    if quality not in QUALITIES:
+        raise UsageError(f"quality must be one of {QUALITIES}", {"quality": quality})
+    if model.startswith(NO_XHIGH_MAX_PREFIX) and quality in ("xhigh", "max"):
+        raise UsageError(
+            f"{model} does not support quality {quality}; use low|medium|high, "
+            "or --image-model gpt-image-2.5-sunburst for xhigh/max",
+            {"model": model, "quality": quality},
+        )
 
 
 def _default_client() -> Any:
@@ -81,13 +94,12 @@ def generate(
 
     Returns {"path", "model", "size", "quality", "usage", "endpoint"}.
     """
-    if quality not in QUALITIES:
-        raise UsageError(f"quality must be one of {QUALITIES}", {"quality": quality})
+    model = image_model(model)
+    check_quality(model, quality)
     inputs = list(inputs or [])
     for p in inputs:
         if not Path(p).is_file():
             raise UsageError(f"input image not found: {p}", {"path": str(p)})
-    model = image_model(model)
     client = client_factory()
     files = []
     try:
