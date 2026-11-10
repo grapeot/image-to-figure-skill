@@ -118,3 +118,14 @@ def test_unexpected_local_error_does_not_hide_other_results(fake_fal, tmp_path, 
     res = {r["provider"]: r for r in fal3d.run_many(fake_fal, ["tripo", "rodin"], urls, tmp_path, {})}
     assert res["tripo"]["ok"] and not res["rodin"]["ok"]
     assert "boom" in res["rodin"]["error"]["message"]
+
+
+def test_gpt_image_2_6_rejects_xhigh_and_max(fake_openai, tmp_path):
+    for tier in ("xhigh", "max"):
+        with pytest.raises(UsageError):
+            images.generate(prompt="p", out_path=tmp_path / "a.png", size="1024x1024", quality=tier)
+    assert fake_openai.calls == []
+    images.generate(
+        prompt="p", out_path=tmp_path / "b.png", size="1024x1024", quality="max", model="gpt-image-2.5-sunburst"
+    )
+    assert fake_openai.calls[0][1]["quality"] == "max"
