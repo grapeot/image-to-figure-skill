@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from .errors import MissingDependency, ProviderError, UsageError
 
-DEFAULT_MODEL = "gpt-image-2.5-sunburst"
+DEFAULT_MODEL = "gpt-image-2.6-sunburst"
 QUALITIES = ("low", "medium", "high", "xhigh", "max")
 
 
